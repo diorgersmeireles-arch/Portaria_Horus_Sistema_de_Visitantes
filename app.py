@@ -47,12 +47,13 @@ class VisitEvent(db.Model):
     visitor = db.relationship("Visitor", backref=db.backref("visits", lazy=True))
 
 class Student(db.Model):
-    #Cadastro de aluno com matrícula única, nome completo e turma (opcional).#
+    #Cadastro de aluno com matrícula única, nome completo, turma e telefone do responsável (opcional).#
     __tablename__ = "students"
     id = db.Column(db.Integer, primary_key=True)
     matricula = db.Column(db.String(50), nullable=False, unique=True, index=True)
     full_name = db.Column(db.String(200), nullable=False)
     class_name = db.Column(db.String(100), nullable=True)
+    parent_phone = db.Column(db.String(20), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class StudentArrival(db.Model):
@@ -152,6 +153,13 @@ def parse_base_class_time(today: datetime) -> datetime:
 def compute_is_late(arrived_at: datetime) -> bool:
     base_dt = parse_base_class_time(arrived_at)
     return arrived_at > base_dt
+
+def compute_late_minutes(arrived_at: datetime) -> int:
+    base_dt = parse_base_class_time(arrived_at)
+    if arrived_at > base_dt:
+        delta = arrived_at - base_dt
+        return int(delta.total_seconds() // 60)
+    return 0
 
 @app.before_request
 def _maintenance():
@@ -285,17 +293,19 @@ def students_new():
         matricula = (request.form.get("matricula") or "").strip()
         full_name = (request.form.get("full_name") or "").strip()
         class_name = (request.form.get("class_name") or "").strip()
+        parent_phone = (request.form.get("parent_phone") or "").strip() or None
         if not (matricula and full_name):
             flash("Matrícula e Nome são obrigatórios.", "error")
             return redirect(url_for("students_new"))
 
         s = Student.query.filter_by(matricula=matricula).first()
         if not s:
-            s = Student(matricula=matricula, full_name=full_name, class_name=class_name)
+            s = Student(matricula=matricula, full_name=full_name, class_name=class_name, parent_phone=parent_phone)
             db.session.add(s)
         else:
             s.full_name = full_name
             s.class_name = class_name
+            s.parent_phone = parent_phone
         db.session.commit()
         flash("Aluno cadastrado/atualizado.", "success")
         return redirect(url_for("students_home"))
@@ -314,25 +324,28 @@ def students_import():
             reader = csv.DictReader(io.StringIO(content))
             # Normalize headers
             headers = { (h or "").strip().lower(): h for h in reader.fieldnames or [] }
-            required = {"matricula", "nome_completo", "turma"}
+            required = {"matricula", "nome_completo"}
             if not required.issubset(set(headers.keys())):
-                flash("Cabeçalhos esperados: matricula, nome_completo, turma.", "error")
+                flash("Cabeçalhos mínimos esperados: matricula, nome_completo (turma e telefone_responsavel são opcionais).", "error")
                 return redirect(url_for("students_import"))
             created = updated = 0
             for row in reader:
                 matricula = (row.get(headers["matricula"]) or "").strip()
                 full_name = (row.get(headers["nome_completo"]) or "").strip()
-                class_name = (row.get(headers["turma"]) or "").strip()
+                class_name = (row.get(headers["turma"]) or "").strip() or None
+                parent_phone = (row.get(headers.get("telefone_responsavel", "")) or "").strip() or None
                 if not (matricula and full_name):
                     continue
                 s = Student.query.filter_by(matricula=matricula).first()
                 if not s:
-                    s = Student(matricula=matricula, full_name=full_name, class_name=class_name)
+                    s = Student(matricula=matricula, full_name=full_name, class_name=class_name, parent_phone=parent_phone)
                     db.session.add(s)
                     created += 1
                 else:
                     s.full_name = full_name
                     s.class_name = class_name
+                    if parent_phone:
+                        s.parent_phone = parent_phone
                     updated += 1
             db.session.commit()
             flash(f"Import concluído. Criados: {created} | Atualizados: {updated}.", "success")
@@ -457,7 +470,41 @@ def export_late_students_csv():
     w = csv.writer(buf)
     w.writerows(rows)
     data = buf.getvalue().encode("utf-8")
-    return Response(data, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=alunos_atrasos.csv"})
+    return Response(data, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=alunos_atrasos_resumo.csv"})
+
+@app.route("/reports/export/late_arrivals.csv")
+def export_late_arrivals_csv():
+    #Exporta CSV detalhado de atrasos de alunos: cada chegada com data/hora e minutos de atraso.
+    date_from = request.args.get("from")
+    date_to = request.args.get("to")
+    def parse_date(d):
+        try:
+            return datetime.strptime(d, "%Y-%m-%d").date()
+        except Exception:
+            return None
+    d_from = parse_date(date_from) or (datetime.utcnow().date() - timedelta(days=30))
+    d_to = parse_date(date_to) or datetime.utcnow().date()
+    dt_from = datetime.combine(d_from, time.min)
+    dt_to = datetime.combine(d_to, time.max)
+
+    rows = [["Matrícula", "Nome", "Turma", "Data/Hora Chegada", "Minutos de Atraso"]]
+    late_q = (
+        db.session.query(StudentArrival, Student)
+        .join(Student, StudentArrival.student_id == Student.id)
+        .filter(StudentArrival.arrived_at >= dt_from, StudentArrival.arrived_at <= dt_to)
+        .filter(StudentArrival.is_late == True)
+        .order_by(StudentArrival.arrived_at.desc())
+        .all()
+    )
+    for arr, s in late_q:
+        minutes_late = compute_late_minutes(arr.arrived_at)
+        rows.append([s.matricula, s.full_name, s.class_name or "", arr.arrived_at.isoformat(sep=" "), minutes_late])
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerows(rows)
+    data = buf.getvalue().encode("utf-8")
+    return Response(data, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=alunos_atrasos_detalhado.csv"})
 
 # ---------- CLI ----------
 @app.cli.command("init-db")

@@ -9,7 +9,8 @@
     <div class="form-actions">
       <button type="submit">Filtrar</button>
       <a class="button" href="{{ url_for('export_visits_csv', from=d_from.isoformat(), to=d_to.isoformat()) }}">Exportar Visitas (CSV)</a>
-      <a class="button" href="{{ url_for('export_late_students_csv', from=d_from.isoformat(), to=d_to.isoformat()) }}">Exportar Atrasos (CSV)</a>
+      <a class="button" href="{{ url_for('export_late_students_csv', from=d_from.isoformat(), to=d_to.isoformat()) }}">Exportar Atrasos Resumo</a>
+      <a class="button" href="{{ url_for('export_late_arrivals_csv', from=d_from.isoformat(), to=d_to.isoformat()) }}">Exportar Atrasos Detalhado</a>
     </div>
   </form>
 </section>
